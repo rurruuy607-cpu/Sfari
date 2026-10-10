@@ -1,0 +1,257 @@
+name: Build APK
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: 8.7 }
+      - name: Write project files
+        run: |
+          mkdir -p $(dirname settings.gradle.kts)
+          cat > settings.gradle.kts <<'EOF_FILE'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "OldSafari"
+          include(":app")
+          EOF_FILE
+          mkdir -p $(dirname build.gradle.kts)
+          cat > build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_FILE
+          mkdir -p $(dirname gradle.properties)
+          cat > gradle.properties <<'EOF_FILE'
+          org.gradle.jvmargs=-Xmx2g
+          EOF_FILE
+          mkdir -p $(dirname app/build.gradle.kts)
+          cat > app/build.gradle.kts <<'EOF_FILE'
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+              namespace = "com.example.oldsafari"
+              compileSdk = 34
+              defaultConfig { applicationId = "com.example.oldsafari"; minSdk = 24; targetSdk = 34; versionCode = 1; versionName = "1.0" }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF_FILE
+          mkdir -p $(dirname app/src/main/AndroidManifest.xml)
+          cat > app/src/main/AndroidManifest.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <application android:label="Safari" android:usesCleartextTraffic="true"
+                  android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true"
+                      android:windowSoftInputMode="adjustResize" android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.VIEW" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <category android:name="android.intent.category.BROWSABLE" />
+                          <data android:scheme="http" /><data android:scheme="https" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF_FILE
+          mkdir -p $(dirname app/src/main/java/com/example/oldsafari/MainActivity.kt)
+          cat > app/src/main/java/com/example/oldsafari/MainActivity.kt <<'EOF_FILE'
+          package com.example.oldsafari
+
+          import android.app.Activity
+          import android.app.AlertDialog
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.net.Uri
+          import android.os.Bundle
+          import android.text.InputType
+          import android.view.Gravity
+          import android.view.View
+          import android.view.inputmethod.EditorInfo
+          import android.webkit.WebResourceError
+          import android.webkit.WebResourceRequest
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
+          import android.widget.*
+
+          class MainActivity : Activity() {
+              private val tabs = mutableListOf<WebView>()
+              private var cur = 0
+              private lateinit var titleView: TextView
+              private lateinit var urlField: EditText
+              private lateinit var searchField: EditText
+              private lateinit var holder: FrameLayout
+              private lateinit var countView: TextView
+              private val prefs by lazy { getSharedPreferences("safari", MODE_PRIVATE) }
+
+              private fun dp(i: Int) = (i * resources.displayMetrics.density).toInt()
+              private fun grad(top: Int, bottom: Int) =
+                  GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(top, bottom))
+              private fun fieldBg() = GradientDrawable().apply {
+                  setColor(Color.WHITE); cornerRadius = dp(8).toFloat(); setStroke(dp(1), 0xFF4B5F7F.toInt())
+              }
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  window.statusBarColor = 0xFFA9B9D0.toInt()
+                  window.navigationBarColor = 0xFF4D6588.toInt()
+
+                  val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE); fitsSystemWindows = true }
+
+                  // Top bar
+                  val top = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      background = grad(0xFFA9B9D0.toInt(), 0xFF6D84A5.toInt())
+                      setPadding(dp(8), dp(4), dp(8), dp(8))
+                  }
+                  titleView = TextView(this).apply {
+                      text = "Safari"; gravity = Gravity.CENTER; textSize = 17f; setTypeface(null, Typeface.BOLD)
+                      setTextColor(0xFF2D3B52.toInt()); setShadowLayer(1f, 0f, 1f, 0x99FFFFFF.toInt()); maxLines = 1
+                      setPadding(0, dp(2), 0, dp(5))
+                  }
+                  urlField = EditText(this).apply {
+                      background = fieldBg(); setPadding(dp(10), 0, dp(10), 0); textSize = 16f; maxLines = 1
+                      inputType = InputType.TYPE_TEXT_VARIATION_URI or InputType.TYPE_CLASS_TEXT
+                      imeOptions = EditorInfo.IME_ACTION_GO; setSelectAllOnFocus(true); isSingleLine = true
+                      setOnEditorActionListener { _, _, _ -> go(text.toString()); clearFocus(); hideKb(); true }
+                  }
+                  searchField = EditText(this).apply {
+                      background = fieldBg(); setPadding(dp(10), 0, dp(10), 0); textSize = 16f; hint = "Search"
+                      imeOptions = EditorInfo.IME_ACTION_SEARCH; isSingleLine = true
+                      setOnEditorActionListener { _, _, _ -> go(text.toString()); setText(""); clearFocus(); hideKb(); true }
+                  }
+                  val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                  row.addView(urlField, LinearLayout.LayoutParams(0, dp(36), 2f).apply { marginEnd = dp(8) })
+                  row.addView(searchField, LinearLayout.LayoutParams(0, dp(36), 1f))
+                  top.addView(titleView); top.addView(row)
+
+                  holder = FrameLayout(this)
+
+                  // Bottom bar
+                  val bottom = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                      background = grad(0xFF8097B7.toInt(), 0xFF4D6588.toInt())
+                  }
+                  fun btn(label: String, onClick: () -> Unit) = TextView(this).apply {
+                      text = label; textSize = 24f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
+                      setShadowLayer(1f, 0f, -1f, 0x66000000); setOnClickListener { onClick() }
+                  }
+                  val back = btn("\u25C0") { web().let { if (it.canGoBack()) it.goBack() } }
+                  val fwd = btn("\u25B6") { web().let { if (it.canGoForward()) it.goForward() } }
+                  val share = btn("\u2934") {
+                      startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+                          type = "text/plain"; putExtra(Intent.EXTRA_TEXT, web().url ?: "")
+                      }, "Share"))
+                  }
+                  val marks = btn("\uD83D\uDCD6") { bookmarks() }
+                  countView = TextView(this).apply {
+                      text = "1"; textSize = 15f; setTypeface(null, Typeface.BOLD); setTextColor(0xFF2D3B52.toInt()); gravity = Gravity.CENTER
+                      background = GradientDrawable().apply { setColor(0xFFE3E9F2.toInt()); setStroke(dp(2), Color.WHITE); cornerRadius = dp(5).toFloat() }
+                      setOnClickListener { tabDialog() }
+                  }
+                  for (v in listOf(back, fwd, share, marks)) bottom.addView(v, LinearLayout.LayoutParams(0, dp(46), 1f))
+                  val cw = FrameLayout(this).apply { addView(countView, FrameLayout.LayoutParams(dp(32), dp(26), Gravity.CENTER)) }
+                  bottom.addView(cw, LinearLayout.LayoutParams(0, dp(46), 1f))
+
+                  root.addView(top); root.addView(holder, LinearLayout.LayoutParams(-1, 0, 1f)); root.addView(bottom)
+                  setContentView(root)
+
+                  newTab(intent?.data?.toString() ?: "https://www.google.com")
+              }
+
+              private fun web() = tabs[cur]
+              private fun hideKb() = (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+                  .hideSoftInputFromWindow(urlField.windowToken, 0)
+
+              private fun newTab(url: String?) {
+                  val w = WebView(this).apply {
+                      settings.javaScriptEnabled = true; settings.domStorageEnabled = true
+                      settings.builtInZoomControls = true; settings.displayZoomControls = false
+                      webViewClient = object : WebViewClient() {
+                          override fun onPageStarted(v: WebView, u: String, f: android.graphics.Bitmap?) {
+                              if (v === web() && !urlField.hasFocus()) urlField.setText(u.removePrefix("https://").removePrefix("http://"))
+                              if (v === web()) titleView.text = "Loading\u2026"
+                          }
+                          override fun onPageFinished(v: WebView, u: String) {
+                              if (v === web()) titleView.text = v.title?.takeIf { it.isNotBlank() } ?: u
+                          }
+                          override fun onReceivedError(v: WebView, r: WebResourceRequest, e: WebResourceError) {
+                              if (r.isForMainFrame) {
+                                  if (v === web()) titleView.text = "Cannot Open Page"
+                                  v.loadDataWithBaseURL(r.url.toString(), errorPage(r.url.host ?: ""), "text/html", "utf-8", r.url.toString())
+                              }
+                          }
+                      }
+                  }
+                  tabs.add(w); select(tabs.size - 1)
+                  if (url != null) w.loadUrl(url)
+              }
+
+              private fun select(i: Int) {
+                  cur = i; holder.removeAllViews(); holder.addView(web(), FrameLayout.LayoutParams(-1, -1))
+                  countView.text = tabs.size.toString()
+                  val u = web().url
+                  urlField.setText(u?.removePrefix("https://")?.removePrefix("http://") ?: "")
+                  titleView.text = web().title ?: "Safari"
+              }
+
+              private fun go(raw: String) {
+                  val q = raw.trim(); if (q.isEmpty()) return
+                  val url = when {
+                      q.startsWith("http://") || q.startsWith("https://") -> q
+                      !q.contains(" ") && q.contains(".") -> "https://$q"
+                      else -> "https://www.google.com/search?q=" + Uri.encode(q)
+                  }
+                  web().loadUrl(url)
+              }
+
+              private fun tabDialog() {
+                  val names = tabs.map { it.title?.takeIf { t -> t.isNotBlank() } ?: it.url ?: "New Page" }.toTypedArray()
+                  AlertDialog.Builder(this).setTitle("Pages")
+                      .setItems(names) { _, i -> select(i) }
+                      .setPositiveButton("New Page") { _, _ -> newTab("https://www.google.com") }
+                      .setNegativeButton("Close Page") { _, _ ->
+                          if (tabs.size > 1) { tabs.removeAt(cur).destroy(); select(minOf(cur, tabs.size - 1)) }
+                      }.show()
+              }
+
+              private fun bookmarks() {
+                  val set = prefs.getStringSet("marks", emptySet())!!.toList().sorted()
+                  AlertDialog.Builder(this).setTitle("Bookmarks")
+                      .setItems(set.toTypedArray()) { _, i -> web().loadUrl(set[i]) }
+                      .setPositiveButton("Add Bookmark") { _, _ ->
+                          web().url?.let { prefs.edit().putStringSet("marks", set.toSet() + it).apply() }
+                      }.show()
+              }
+
+              private fun errorPage(host: String) = """
+                  <html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+                  <body style="margin:0;display:flex;height:100vh;align-items:center;justify-content:center;text-align:center;
+                  font-family:Helvetica,Arial,sans-serif;background:#fff">
+                  <div style="padding:24px"><div style="width:160px;height:160px;margin:0 auto 28px;border-radius:28px;
+                  background:#ececf0;border:3px solid #e1e2e8"></div>
+                  <p style="font-size:21px;font-weight:bold;color:#8b95a5;text-shadow:0 1px 0 #fff">
+                  Safari cannot open the page${if (host.isNotEmpty()) " \"$host\"" else ""} because it could not connect to the Internet or the server.</p></div></body></html>"""
+
+              @Deprecated("Deprecated in Java")
+              override fun onBackPressed() {
+                  if (web().canGoBack()) web().goBack() else super.onBackPressed()
+              }
+          }
+          EOF_FILE
+      - run: gradle assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OldSafari-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
